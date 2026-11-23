@@ -1,0 +1,67 @@
+name: Secure delivery
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install and test
+        run: |
+          python -m pip install -r requirements.txt httpx pip-audit
+          python -m unittest discover -s tests -v
+      - name: Audit application dependencies
+        run: pip-audit -r requirements.txt
+      - name: Build and smoke-test the image
+        run: |
+          docker build --tag secure-delivery-lab:ci .
+          docker run --detach --name lab --read-only --cap-drop ALL --security-opt no-new-privileges --publish 127.0.0.1:8000:8000 secure-delivery-lab:ci
+          curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8000/healthz
+          test "$(docker exec lab id -u)" = "10001"
+      - name: Scan the image for fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: secure-delivery-lab:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Save the tested image
+        if: github.event_name == 'push'
+        run: docker save secure-delivery-lab:ci | gzip > image.tar.gz
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: github.event_name == 'push'
+        with:
+          name: verified-image
+          path: image.tar.gz
+          retention-days: 1
+  publish:
+    if: github.event_name == 'push'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: verified-image
+      - name: Publish verified image to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker load --input image.tar.gz
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
+          docker tag secure-delivery-lab:ci "$image"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$image"
