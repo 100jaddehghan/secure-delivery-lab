@@ -24,9 +24,12 @@ jobs:
         run: pip-audit -r requirements.txt
       - name: Build and smoke-test the image
         run: |
-          docker build --tag secure-delivery-lab:ci .
+          docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" --tag secure-delivery-lab:ci .
           docker run --detach --name lab --read-only --cap-drop ALL --security-opt no-new-privileges --publish 127.0.0.1:8000:8000 secure-delivery-lab:ci
-          curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8000/healthz
+          if ! curl --fail --silent --show-error --retry 15 --retry-all-errors --retry-delay 1 --max-time 3 http://127.0.0.1:8000/healthz; then
+            docker logs lab
+            exit 1
+          fi
           test "$(docker exec lab id -u)" = "10001"
       - name: Scan the image for fixable high and critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
